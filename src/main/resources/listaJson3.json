@@ -1,0 +1,15 @@
+{
+  "_id": {
+    "filial": 1000,
+    "tipoProduto": 1,
+    "sku": 123456
+  },
+  "estadoProduto": {
+    "PADRAO": {
+      "comercializacao": 103,
+      "preco": {
+        "por": "199.90"
+      }
+    }
+  }
+}
