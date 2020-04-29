@@ -5,13 +5,17 @@ import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.functions._
 
 object Application {
+
   def main(args: Array[String]): Unit = {
-
     val sparkSession = SparkSession.builder().appName("SparkStudy").master("local").getOrCreate()
-
     import sparkSession.implicits._
 
-    val precos1 = sparkSession.read.json("/home/jhona/dev/workspace-spark/SparkStudy/src/main/resources/listaJson1.json")
+    sparkSession.conf.set("spark.sql.shuffle.partitions", 6)
+    sparkSession.conf.set("spark.executor.memory", "1g")
+
+    val precosAntigos = sparkSession.read.json("/home/jhona/dev/precificacao_filial_1000_old.json")
+      .filter("estadoProduto is not null")
+      .drop("precoOnline", "_class", "precoCusto", "precoSugestao", "ultimaAtualizacao")
       .withColumn("udfResult", explode(mapearEstadosProduto($"estadoProduto")))
       .withColumn("estadoProduto", $"udfResult._1")
       .withColumn("codigoComercializacao_1", $"udfResult._2")
@@ -20,8 +24,9 @@ object Application {
       .withColumn("precoLimite_1", $"udfResult._5")
       .drop($"udfResult")
 
-
-    val precos2 = sparkSession.read.json("/home/jhona/dev/workspace-spark/SparkStudy/src/main/resources/listaJson2.json")
+    val precosNovos = sparkSession.read.json("/home/jhona/dev/precificacao_filial_1000_nova.json")
+      .filter("estadoProduto is not null")
+      .drop("precoOnline", "_class", "precoCusto", "precoSugestao", "ultimaAtualizacao")
       .withColumn("udfResult", explode(mapearEstadosProduto($"estadoProduto")))
       .withColumn("estadoProduto", $"udfResult._1")
       .withColumn("codigoComercializacao_2", $"udfResult._2")
@@ -30,16 +35,35 @@ object Application {
       .withColumn("precoLimite_2", $"udfResult._5")
       .drop($"udfResult")
 
-    val precosJoin = precos1.join(precos2, Seq("_id", "estadoProduto"), "left")
+    val precosJoin = precosAntigos.join(precosNovos, Seq("_id", "estadoProduto"), "left")
       .na.fill(0, Seq("codigoComercializacao_1", "codigoComercializacao_2"))
       .na.fill("0", Seq("precoCartaz_1", "precoMinimo_1", "precoLimite_1", "precoCartaz_2", "precoMinimo_2", "precoLimite_2"))
 
-    precosJoin.show(false)
+    println()
+    println(s"Total de comercializações: ${precosJoin.count()}")
+    println(s"Total de precificações: ${precosJoin.select("_id").distinct().count()}")
+    println()
+    //IGUALDADES
+    println("Igualdades:")
+    val igualdades = precosJoin.filter("codigoComercializacao_1 = codigoComercializacao_2 AND precoCartaz_1 = precoCartaz_2 AND precoMinimo_1 = precoMinimo_2 AND precoLimite_1 = precoLimite_2")
+    println("Amostra de igualdades:")
+    igualdades.show(false)
+    println($"Comercializações iguais: ${igualdades.count()}")
+    println($"Precificações iguais: ${igualdades.select("_id").distinct().count()}")
 
+    println()
+    println("Diferenças:")
     val diferencas = precosJoin.filter("codigoComercializacao_1 <> codigoComercializacao_2 OR precoCartaz_1 <> precoCartaz_2 OR precoMinimo_1 <> precoMinimo_2 OR precoLimite_1 <> precoLimite_2")
-    diferencas.show(false)
 
-    println(diferencas.count())
+    println("Amostra de preços diferentes:")
+    diferencas.show(false)
+    println(s"Quantidade de fiferencas: ${diferencas.count()}")
+
+    println(s"Quantidade de diferencas PADRAO: ${diferencas.filter("estadoProduto = 'PADRAO'").count()}")
+    println(s"Quantidade de diferencas SALDO: ${diferencas.filter("estadoProduto = 'SALDO'").count()}")
+    println(s"Quantidade de diferencas MOSTRUARIO: ${diferencas.filter("estadoProduto = 'MOSTRUARIO'").count()}")
+
+    println(s"Diferenças únicas: ${diferencas.select("_id").distinct().count()}")
 
 
     //TODO id que existe na antiga e não existe na nova
@@ -56,36 +80,49 @@ object Application {
     //TODO atualizar divergencia apenas na filial necessária
   }
 
-  //  def mapStructs: UserDefinedFunction = udf((r: Row) => {
-  //    r.schema.fields.map(f => (
-  //      f.name,
-  //      r.getAs[Row](f.name).getAs[Long]("comercializacao"),
-  //      r.getAs[Row](f.name).getAs[Row]("preco").getAs[String]("por")
-  //    ))
-  //  })
-
   def mapearEstadosProduto: UserDefinedFunction = udf((r: Row) => {
     r.schema.fields.map(f => (
       f.name,
-      r.getAs[Row](f.name).getAs[Long]("comercializacao"),
+      obterCodigoComercializacao(r.getAs[Row](f.name)),
       obterPrecoCartaz(r.getAs[Row](f.name)),
       obterPrecoMinimo(r.getAs[Row](f.name)),
       obterPrecoLimite(r.getAs[Row](f.name))
     ))
   })
 
+  def obterCodigoComercializacao(r: Row): Long = {
+    val comercializacao = obterComercializacao(r)
+    if (comercializacao == null) return 0
+    comercializacao.getAs[Long]("codigo")
+  }
+
+  def obterComercializacao(r: Row): Row = {
+    if (r == null) return null
+    r.getAs[Row]("comercializacao")
+  }
+
   def obterPrecoCartaz(r: Row): String = {
-    if (!r.schema.fieldNames.contains("preco")) return null
-    r.getAs[Row]("preco").getAs[String]("por")
+    val comercializacao = obterComercializacao(r)
+    if (comercializacao == null) return null
+    if (!comercializacao.schema.fieldNames.contains("preco")) return null
+    if (comercializacao.getAs[Row]("preco") == null) return null
+    comercializacao.getAs[Row]("preco").getAs[String]("por")
   }
 
   def obterPrecoMinimo(r: Row): String = {
-    if (!r.schema.fieldNames.contains("precoMinimo")) return null
-    r.getAs[Row]("precoMinimo").getAs[String]("por")
+    val comercializacao = obterComercializacao(r)
+    if (comercializacao == null) return null
+    if (!comercializacao.schema.fieldNames.contains("precoMinimo")) return null
+    if (comercializacao.getAs[Row]("precoMinimo") == null) return null
+    if (comercializacao.getAs[Row]("precoMinimo").schema.contains("por")) return null
+    comercializacao.getAs[Row]("precoMinimo").getAs[String]("por")
   }
 
   def obterPrecoLimite(r: Row): String = {
-    if (!r.schema.fieldNames.contains("precoLimite")) return null
-    r.getAs[Row]("precoLimite").getAs[String]("por")
+    val comercializacao = obterComercializacao(r)
+    if (comercializacao == null) return null
+    if (!comercializacao.schema.fieldNames.contains("precoLimite")) return null
+    if (comercializacao.getAs[Row]("precoLimite") == null) return null
+    comercializacao.getAs[Row]("precoLimite").getAs[String]("por")
   }
 }
